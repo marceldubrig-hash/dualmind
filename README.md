@@ -11,6 +11,8 @@ Shared, persistent single-owner workspace for connected ChatGPT/Gemini clients a
 - Android Compose client: shared chat, projects, shared memory/tasks, polling/cancellation, explicit provider-transfer consent, system light/dark theme, safe insets, masked tokens, optional Android Keystore encrypted login storage. No provider keys in Android.
 - Backend tests and Android build/lint CI with APK artifact upload.
 
+German phone setup guide: [Erste Schritte](docs/ERSTE_SCHRITTE.md).
+
 ## Quick start
 
 Requires Python 3.12. From the repository root:
