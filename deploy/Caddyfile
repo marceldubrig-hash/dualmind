@@ -1,0 +1,15 @@
+# Replace hostname; configure DNS before starting Caddy. It provisions TLS.
+dualmind.example.com {
+    request_body {
+        max_size 1MB
+    }
+    handle /mcp* {
+        reverse_proxy 127.0.0.1:8001
+    }
+    handle /.well-known/* {
+        reverse_proxy 127.0.0.1:8001
+    }
+    handle {
+        reverse_proxy 127.0.0.1:8000
+    }
+}
