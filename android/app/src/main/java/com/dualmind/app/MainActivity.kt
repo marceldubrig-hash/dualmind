@@ -118,24 +118,25 @@ fun DualMindScreen() {
 
     suspend fun monitorRun(id: String) {
         runId = id
-                    try {
-                        while (true) {
-                            val run = JSONObject(api.request("/runs/$runId"))
-                            status = "${run.getString("state")} · ${run.getInt("calls")} Modellaufrufe"
-                            val arr = JSONArray(api.request("/rooms/$selectedRoom/messages?latest=true"))
-                            lines.clear()
-                            for (i in 0 until arr.length()) {
-                                val item = arr.getJSONObject(i)
-                                lines.add(ChatLine(item.getString("role"), item.getString("content"), item.optString("origin")))
-                            }
-                            if (run.getString("state") !in listOf("queued", "running")) {
-                                status += " " + run.optString("error")
-                                break
-                            }
-                            delay(2000)
-                        }
-                    } finally { runId = "" }
+        try {
+            while (true) {
+                val run = JSONObject(api.request("/runs/$runId"))
+                status = "${run.getString("state")} · ${run.getInt("calls")} Modellaufrufe"
+                val arr = JSONArray(api.request("/rooms/$selectedRoom/messages?latest=true"))
+                lines.clear()
+                for (i in 0 until arr.length()) {
+                    val item = arr.getJSONObject(i)
+                    lines.add(ChatLine(item.getString("role"), item.getString("content"), item.optString("origin")))
+                }
+                if (run.getString("state") !in listOf("queued", "running")) {
+                    status += " " + run.optString("error")
+                    break
+                }
+                delay(2000)
+            }
+        } finally { runId = "" }
     }
+
 
     Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().widthIn(max = 1000.dp).padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
