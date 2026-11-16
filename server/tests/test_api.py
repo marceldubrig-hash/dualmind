@@ -25,11 +25,5 @@ def test_auth_and_rooms():
     assert client.get(f"/rooms/{rid}/notes", headers=HEADERS).json()["goal"] == "ship"
 
 
-def test_collaboration(monkeypatch):
-    rid = client.post("/rooms", headers=HEADERS, json={"name": "Round"}).json()["id"]
-    monkeypatch.setattr(main, "openai_reply", lambda prompt: "OpenAI reply")
-    monkeypatch.setattr(main, "gemini_reply", lambda prompt: "Gemini reply")
-    response = client.post(f"/rooms/{rid}/collaborate", headers=HEADERS, json={"prompt": "Build it"})
-    assert response.status_code == 200
-    assert response.json() == {"proposal":"OpenAI reply","critique":"Gemini reply","final":"OpenAI reply"}
-    assert [m["role"] for m in client.get(f"/rooms/{rid}/messages", headers=HEADERS).json()] == ["user","openai","gemini","openai"]
+def test_legacy_collaboration_requires_explicit_new_contract():
+    assert client.post('/rooms/x/collaborate',headers=HEADERS,json={'prompt':'test'}).status_code == 410

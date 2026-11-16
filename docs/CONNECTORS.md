@@ -1,54 +1,57 @@
-# Direct consumer-app connection plan
+# Consumer-client connections (checked 2026-11-16)
 
-## Current working scope
-DualMind's core FastAPI backend remains the source of truth. A read-only MCP
-bridge is implemented in `server/app/mcp_bridge.py`, exposing three tools:
-`list_rooms`, `read_room_messages`, and `read_room_notes`.
+## What this means
 
-This is a first stage only. It is **not** an activated ChatGPT or Gemini
-connection. It does not automatically ingest existing chats or memories.
+A connected client reads/publishes explicitly selected content in the same project database. It does not import all existing chats, notify another app automatically, or wake Gemini/ChatGPT in the background. Each consumer client must invoke tools during its own conversation. `start_collaboration` is explicitly a separate paid model-API workflow.
 
-## Run for local development
-From `server/`, with `.env` configured, install:
-```sh
-pip install -r requirements-mcp.txt
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-# In a second terminal, with DUALMIND_TOKEN exported from your .env:
-python -m app.mcp_bridge
+## OAuth resource server setup
+
+DualMind does not invent a password login or issue its own OAuth grants. Use an OAuth 2.1-capable identity provider supporting authorization code + S256 PKCE, authorization server metadata/OIDC discovery, resource/audience-bound JWT access tokens, and scopes `workspace:read` and `workspace:write`. Register separate ChatGPT and Gemini clients with the exact callback URLs those products provide. Do not guess callbacks. Disable unnecessary grants. Grant write scope only after consent. Dynamic registration is an IdP feature, not implemented here; use pre-registered client credentials where the product supports them.
+
+Configure in the MCP process environment:
+
 ```
-The MCP endpoint is at `http://127.0.0.1:8001/mcp`, on the
-same development machine only.
+DUALMIND_OAUTH_ISSUER=https://your-idp.example/
+DUALMIND_OAUTH_JWKS=https://your-idp.example/.well-known/jwks.json
+DUALMIND_OAUTH_SUBJECT=your-exact-owner-subject
+DUALMIND_MCP_URL=https://your-workspace.example/mcp
+DUALMIND_BACKEND_URL=http://127.0.0.1:8000
+DUALMIND_TOKEN=the-private-server-to-server-owner-token
+```
 
-**Security warning:** The initial bridge has no inbound MCP client authentication.
-Do not expose or tunnel it publicly as is. Put it behind a standards-compliant
-OAuth 2.1 auth gateway with TLS, user-level authorization, origin validation,
-rate limiting, access logs and least-privilege scopes. The backend token is a
-server-to-server credential and must never appear in Gemini/ChatGPT tools or apps.
+From `server/`, export these values securely (or use a service EnvironmentFile), then `python -m app.mcp_bridge`. The process binds loopback:8001. Put the supplied Caddy configuration in front. The bridge refuses startup if HTTPS OAuth configuration is missing. Never expose `mcp.streamable_http_app()` directly while bypassing `application()`.
+
+The backend owner token is never the consumer OAuth token. MCP validates incoming tokens before forwarding a limited operation with its separate server credential. Only the configured owner `sub` is accepted: this is intentionally a single-owner deployment, not multi-tenant IAM.
 
 ## ChatGPT
-ChatGPT's supported Plugins workflow can connect a remote MCP server via
-Plugins > Add custom MCP server, subject to account/plan permissions.
-See https://developers.openai.com/api/docs/guides/custom-mcp-server
-Use the **authenticated HTTPS gateway URL** ending in `/mcp`, not localhost.
 
-## Gemini
-Google's custom Connected Apps integration supports MCP servers in the standard
-Gemini web/mobile apps only for eligible personal accounts in the US, in English,
-at the time this document was written (November 2026).
-See https://support.google.com/gemini/answer/17209137
+Official instructions: https://developers.openai.com/plugins/deploy/connect-chatgpt and https://developers.openai.com/plugins/build/app-quickstart
 
-If consumer custom connected apps aren't available in your region, use Gemini
-through our existing server API; alternatively investigate Android AppFunctions
-and the Google Connected Apps developer platform for supported distributions.
-See https://developers.google.com/connected-apps/
+On an eligible account, enable developer mode as described by OpenAI, create the custom app/plugin with your authenticated HTTPS `/mcp` URL, complete OAuth, and test read-only tool discovery first. Ask for project listing, then publish a harmless approved test message. Confirm write approval in the host UI. Account/plan/workspace/mobile availability must be verified in the actual account; this development session does not prove mobile support. There is no supported automatic access to all old ChatGPT chats.
 
-## Planned extensions
-1. Add OAuth 2.1 / identity-aware access layer for remote MCP.
-2. Add user-confirmed write tools: `post_message`, `save_note`, `submit_task`.
-3. Add Android AppFunctions for on-device discoverability if compatible with
-   target Android/Gemini versions.
-4. Add event polling/notifications, conflict handling and explicit imports.
-5. Test against both providers' actual client applications before claiming support.
+## Gemini custom Connected App
 
-The shared store is a collaboration channel, not automatic cross-provider
-transcript or memory synchronization.
+Official instructions: https://support.google.com/gemini/answer/17209137?hl=en-45
+
+Google's current page requires age 18+, a personal Google account in the US, English, and Keep Activity enabled. Setup is in Gemini web → Settings → Connected Apps → Custom app; paste `/mcp`, optionally provide pre-registered OAuth client credentials, then authorize. Google says a connected app can then be used on web and mobile. For a user in Germany this path is currently region-blocked according to that page; no VPN workaround or unsupported integration is provided.
+
+Developer testing: https://developers.google.com/connected-apps/mcp/dev-mode/usage
+
+## Android AppFunctions
+
+Official guides: https://developer.android.com/ai/appfunctions/add-appfunctions and https://developer.android.com/ai/appfunctions/create-manage-connected-apps
+
+The current guide requires compileSdk 37+, AGP 9.1+, AppFunctions 1.0.0-rc01 and generated service declarations. Gemini distribution requires Connected Apps developer-preview access, a registered developer account, a linked Play app, submitted AAB, privacy policy/terms and console approval/testing. Android 17 alone does not grant access.
+
+This branch does **not** include an unverified AppFunctions service or claim Gemini discoverability. It retains the independently buildable SDK 35 app while the new SDK/AGP migration and console access remain outstanding. Intended initial capabilities: list projects, search approved records, read messages; writes should use the platform's confirmation path plus backend approval and scopes. Do not expose locally decrypted owner credentials to an arbitrary caller.
+
+## Acceptance checklist after deployment
+
+1. Unauthenticated `/mcp` returns 401 and OAuth protected-resource metadata is discoverable.
+2. Wrong issuer, audience, expired token and unapproved owner are rejected.
+3. Read-only scope can list/search but cannot send messages or create tasks.
+4. Approved writes appear in Android with connected-client origin.
+5. Gemini can read that same message and publish its approved answer; ChatGPT can read it back.
+6. Repeat in each actual mobile app. Record account, region and versions without credentials.
+
+These client acceptance steps remain unexecuted; passing protocol tests is not a substitute.

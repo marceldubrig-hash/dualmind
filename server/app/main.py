@@ -6,10 +6,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
 from uuid import uuid4
+from typing import Literal
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -37,6 +38,8 @@ def init_db():
         c.execute("""CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES rooms(id),
             role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        if 'origin' not in [r['name'] for r in c.execute('PRAGMA table_info(messages)')]:
+            c.execute("ALTER TABLE messages ADD COLUMN origin TEXT NOT NULL DEFAULT 'legacy'")
         c.execute("""CREATE TABLE IF NOT EXISTS notes (
             room_id TEXT NOT NULL REFERENCES rooms(id), key TEXT NOT NULL,
             value TEXT NOT NULL, PRIMARY KEY(room_id,key))""")
@@ -49,9 +52,18 @@ def auth(authorization: str | None = Header(default=None)):
     token = os.getenv("DUALMIND_TOKEN", "")
     if not token or len(token) < 24:
         raise HTTPException(503, "Server authentication not configured")
-    offered = authorization.removeprefix("Bearer ") if authorization else ""
+    offered = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
     if not secrets.compare_digest(token, offered):
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Unauthorized", headers={"WWW-Authenticate": "Bearer"})
+    import time
+    minute = int(time.time() // 60)
+    with db() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS rate_limits (minute INTEGER PRIMARY KEY, count INTEGER NOT NULL)")
+        c.execute("DELETE FROM rate_limits WHERE minute < ?", (minute-1,))
+        c.execute("INSERT INTO rate_limits VALUES (?,1) ON CONFLICT(minute) DO UPDATE SET count=count+1", (minute,))
+        count = c.execute("SELECT count FROM rate_limits WHERE minute=?", (minute,)).fetchone()[0]
+    if count > int(os.getenv("DUALMIND_REQUESTS_PER_MINUTE", "120")):
+        raise HTTPException(429, "Rate limit exceeded", headers={"Retry-After": "60"})
 
 
 class RoomIn(BaseModel):
@@ -59,6 +71,7 @@ class RoomIn(BaseModel):
 
 
 class MessageIn(BaseModel):
+    origin: Literal['user', 'connected_client'] = 'user'
     role: str = Field(pattern="^user$")
     content: str = Field(min_length=1, max_length=12000)
 
@@ -95,26 +108,27 @@ def ensure_room(c, rid: str):
         raise HTTPException(404, "Room not found")
 
 
-def save_message(rid: str, role: str, content: str):
+def save_message(rid: str, role: str, content: str, origin: str = 'model_apis'):
     mid = str(uuid4())
     with db() as c:
         ensure_room(c, rid)
-        c.execute("INSERT INTO messages(id,room_id,role,content) VALUES (?,?,?,?)",
-                  (mid, rid, role, content))
+        c.execute("INSERT INTO messages(id,room_id,role,content,origin) VALUES (?,?,?,?,?)",
+                  (mid, rid, role, content, origin))
+        c.execute("INSERT INTO audit(room_id,action,object_id,detail) VALUES (?,'message.append',?,?)", (rid,mid,origin))
     return {"id": mid, "room_id": rid, "role": role, "content": content}
 
 
 @app.get("/rooms/{rid}/messages", dependencies=[Depends(auth)])
-def messages(rid: str):
+def messages(rid: str, limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0)):
     with db() as c:
         ensure_room(c, rid)
         return [dict(r) for r in c.execute(
-            "SELECT id,room_id,role,content,created_at FROM messages WHERE room_id=? ORDER BY rowid", (rid,))]
+            "SELECT id,room_id,role,content,created_at,origin FROM messages WHERE room_id=? ORDER BY rowid LIMIT ? OFFSET ?", (rid, limit, offset))]
 
 
 @app.post("/rooms/{rid}/messages", dependencies=[Depends(auth)])
 def add_message(rid: str, data: MessageIn):
-    return save_message(rid, data.role, data.content)
+    return save_message(rid, data.role, data.content, data.origin)
 
 
 @app.get("/rooms/{rid}/notes", dependencies=[Depends(auth)])
@@ -167,7 +181,7 @@ def gemini_reply(prompt: str) -> str:
             r = client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                 headers={"x-goog-api-key": key},
-                json={"contents": [{"parts": [{"text": prompt}]}]})
+                json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 1200}})
             r.raise_for_status()
             data = r.json()
         answer = "\n".join(p["text"] for p in data["candidates"][0]["content"]["parts"] if "text" in p).strip()
@@ -185,25 +199,9 @@ def get_room_lock(rid: str) -> Lock:
 
 @app.post("/rooms/{rid}/collaborate", dependencies=[Depends(auth)])
 def collaborate(rid: str, data: PromptIn):
-    with db() as c:
-        ensure_room(c, rid)
-        prior = list(c.execute(
-            "SELECT role,content FROM messages WHERE room_id=? ORDER BY rowid DESC LIMIT 12", (rid,)))
-        notes = list(c.execute("SELECT key,value FROM notes WHERE room_id=? LIMIT 30", (rid,)))
-    lock = get_room_lock(rid)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(409, "Another collaboration is running in this room")
-    try:
-        # Avoid feeding unlimited conversation context to expensive external APIs.
-        context = "\n".join(f"{x['role']}: {x['content'][:2000]}" for x in reversed(prior))
-        memory = "\n".join(f"{n['key']}: {n['value'][:2000]}" for n in notes)
-        save_message(rid, "user", data.prompt)
-        proposal = openai_reply(f"Shared notes:\n{memory}\nHistory:\n{context}\nUser request: {data.prompt}\nPropose a practical solution.")
-        save_message(rid, "openai", proposal)
-        critique = gemini_reply(f"Shared notes:\n{memory}\nUser request: {data.prompt}\nOpenAI proposal:\n{proposal}\nCritically review and improve this proposal; flag errors and limitations.")
-        save_message(rid, "gemini", critique)
-        final = openai_reply(f"User request: {data.prompt}\nInitial proposal:\n{proposal}\nGemini review:\n{critique}\nProduce a concise, corrected final answer. Mention unresolved differences.")
-        save_message(rid, "openai", final)
-        return {"proposal": proposal, "critique": critique, "final": final}
-    finally:
-        lock.release()
+    raise HTTPException(410, "Use POST /rooms/{id}/runs with explicit provider-transfer consent and limits")
+
+
+# Structured workspace and durable collaboration jobs share this database.
+from .workspace import install
+install(app)

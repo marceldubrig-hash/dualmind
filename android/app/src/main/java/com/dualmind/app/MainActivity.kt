@@ -6,6 +6,11 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -23,17 +28,19 @@ import java.net.URL
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { DualMindScreen() } }
+        setContent { MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) { Surface { DualMindScreen() } } }
     }
 }
 
 private class Api(private val server: String, private val token: String) {
     suspend fun request(path: String, method: String = "GET", body: JSONObject? = null): String =
         withContext(Dispatchers.IO) {
-            require(server.startsWith("https://")) { "Use an HTTPS server URL" }
+            val endpoint = java.net.URI(server)
+            require(endpoint.scheme == "https" && !endpoint.host.isNullOrBlank() && endpoint.userInfo == null && endpoint.query == null && endpoint.fragment == null) { "Bitte eine gültige HTTPS-Adresse eingeben" }
             val url = URL(server.trimEnd('/') + path)
             val connection = (url.openConnection() as HttpURLConnection)
             try {
+                connection.instanceFollowRedirects = false
                 connection.requestMethod = method
                 connection.connectTimeout = 15000
                 connection.readTimeout = 180000
@@ -52,12 +59,22 @@ private class Api(private val server: String, private val token: String) {
         }
 }
 
-private data class ChatLine(val role: String, val content: String)
+private data class ChatLine(val role: String, val content: String, val origin: String = "legacy")
 
 @Composable
 fun DualMindScreen() {
-    var server by remember { mutableStateOf("") }
-    var token by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    val credentials = remember { Credentials(context) }
+    val saved = remember { credentials.load() }
+    var server by remember { mutableStateOf(saved?.first ?: "") }
+    var token by remember { mutableStateOf(saved?.second ?: "") }
+    var rememberLogin by remember { mutableStateOf(false) }
+    var runId by remember { mutableStateOf("") }
+    var approvedTransfer by remember { mutableStateOf(false) }
+    var knowledge by remember { mutableStateOf("") }
+    var knowledgeMode by remember { mutableStateOf(false) }
+    var manageProjects by remember { mutableStateOf(false) }
+    var taskMode by remember { mutableStateOf(false) }
     var connected by remember { mutableStateOf(false) }
     var roomName by remember { mutableStateOf("Mein Raum") }
     var selectedRoom by remember { mutableStateOf("") }
@@ -75,7 +92,7 @@ fun DualMindScreen() {
         if (busy) return
         scope.launch {
             busy = true
-            try { block() } catch (e: Exception) { status = e.message ?: "Unknown error" }
+            try { block() } catch (e: CancellationException) { throw e } catch (e: Exception) { status = e.message ?: "Unknown error" }
             finally { busy = false }
         }
     }
@@ -90,20 +107,24 @@ fun DualMindScreen() {
     }
     fun reloadMessages() = runJob {
         if (selectedRoom.isBlank()) return@runJob
-        lines.clear()
         val arr = JSONArray(api.request("/rooms/$selectedRoom/messages"))
+        lines.clear()
         for (i in 0 until arr.length()) {
             val item = arr.getJSONObject(i)
-            lines.add(ChatLine(item.getString("role"),item.getString("content")))
+            lines.add(ChatLine(item.getString("role"),item.getString("content"),item.optString("origin")))
         }
         status = "Chat geladen"
     }
 
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-        Text("DualMind", style = MaterialTheme.typography.headlineMedium)
+    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().widthIn(max = 1000.dp).padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("DualMind", style = MaterialTheme.typography.headlineMedium)
+            if (connected) TextButton(enabled = !busy, onClick = { credentials.clear(); token = ""; connected = false; selectedRoom = ""; lines.clear(); rooms.clear() }) { Text("Abmelden") }
+        }
         if (!connected) {
             OutlinedTextField(server, { server = it }, label = { Text("HTTPS Server URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(token, { token = it }, label = { Text("Server-Zugangstoken") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(token, { token = it }, label = { Text("Server-Zugangstoken") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
+            Row { Checkbox(rememberLogin, { rememberLogin = it }); Text("Anmeldung auf diesem Gerät speichern") }
             Button(enabled = !busy, onClick = {
                 runJob {
                     val arr = JSONArray(api.request("/rooms"))
@@ -112,11 +133,14 @@ fun DualMindScreen() {
                         val item = arr.getJSONObject(i)
                         rooms.add(item.getString("id") to item.getString("name"))
                     }
+                    if (rememberLogin) credentials.save(server.trim(), token.trim()) else credentials.clear()
                     connected = true
                     status = "Verbunden"
                 }
             }) { Text("Verbinden") }
         } else {
+            TextButton(enabled = !busy, onClick = { manageProjects = !manageProjects }) { Text(if (manageProjects) "Projektverwaltung schließen" else "Projekte verwalten") }
+            if (manageProjects) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(roomName, { roomName = it }, label = { Text("Raumname") }, modifier = Modifier.weight(1f))
                 Button(enabled = !busy, onClick = {
@@ -133,45 +157,79 @@ fun DualMindScreen() {
                 Button(enabled = !busy, onClick = { reloadRooms() }) { Text("Räume laden") }
                 Button(enabled = !busy && selectedRoom.isNotEmpty(), onClick = { reloadMessages() }) { Text("Chat laden") }
             }
-            LazyColumn(modifier = Modifier.heightIn(max = 110.dp)) {
+            }
+            LazyColumn(modifier = Modifier.heightIn(max = 70.dp)) {
                 items(rooms) { room ->
-                    TextButton(onClick = { selectedRoom = room.first; reloadMessages() }) {
+                    TextButton(enabled = !busy, onClick = { selectedRoom = room.first; reloadMessages() }) {
                         Text((if (room.first == selectedRoom) "● " else "") + room.second)
                     }
                 }
             }
+            Row {
+                FilterChip(selected = !knowledgeMode, onClick = { knowledgeMode = false }, label = { Text("Gemeinsamer Chat") })
+                Spacer(Modifier.width(8.dp))
+                FilterChip(selected = knowledgeMode, onClick = { knowledgeMode = true }, label = { Text("Wissen & Aufgaben") })
+            }
             HorizontalDivider()
+            if (!knowledgeMode) {
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(lines) { line ->
-                    Text(line.role.uppercase(), style = MaterialTheme.typography.labelMedium)
+                    Text(when (line.role) { "openai" -> "OpenAI · Modell-API"; "gemini" -> "Gemini · Modell-API"; else -> if (line.origin == "connected_client") "Verbundener Client" else "Du" }, style = MaterialTheme.typography.labelMedium)
                     Text(line.content, modifier = Modifier.padding(bottom = 12.dp))
                 }
             }
-            OutlinedTextField(prompt, { prompt = it }, label = { Text("Aufgabe für beide KIs") }, modifier = Modifier.fillMaxWidth(), maxLines = 4)
-            Button(enabled = !busy && selectedRoom.isNotEmpty() && prompt.isNotBlank(), onClick = {
+            OutlinedTextField(prompt, { prompt = it }, label = { Text("Aufgabe für beide KIs") }, modifier = Modifier.fillMaxWidth(), maxLines = 2)
+            Row { Checkbox(approvedTransfer, { approvedTransfer = it }); Text("Aufgabe und freigegebenes Wissen an beide Anbieter senden (API-Kosten)") }
+            Button(enabled = !busy && approvedTransfer && selectedRoom.isNotEmpty() && prompt.isNotBlank(), onClick = {
                 runJob {
-                    val data = JSONObject().put("prompt", prompt)
-                    api.request("/rooms/$selectedRoom/collaborate", "POST", data)
-                    prompt = ""
-                    lines.clear()
-                    val arr = JSONArray(api.request("/rooms/$selectedRoom/messages"))
-                    for (i in 0 until arr.length()) {
-                        val item = arr.getJSONObject(i)
-                        lines.add(ChatLine(item.getString("role"), item.getString("content")))
-                    }
-                    status = "Diskussionsrunde abgeschlossen"
+                    val data = JSONObject().put("prompt", prompt).put("allow_provider_transfer", true)
+                    val created = JSONObject(api.request("/rooms/$selectedRoom/runs", "POST", data))
+                    runId = created.getString("id")
+                    try {
+                        while (true) {
+                            val run = JSONObject(api.request("/runs/$runId"))
+                            status = "${run.getString("state")} · ${run.getInt("calls")} Modellaufrufe"
+                            val arr = JSONArray(api.request("/rooms/$selectedRoom/messages"))
+                            lines.clear()
+                            for (i in 0 until arr.length()) {
+                                val item = arr.getJSONObject(i)
+                                lines.add(ChatLine(item.getString("role"), item.getString("content"), item.optString("origin")))
+                            }
+                            if (run.getString("state") !in listOf("queued", "running")) {
+                                status += " " + run.optString("error")
+                                break
+                            }
+                            delay(2000)
+                        }
+                    } finally { runId = "" }
                 }
-            }) { Text(if (busy) "Arbeitet…" else "ChatGPT + Gemini diskutieren") }
+            }) { Text(if (busy) "Arbeitet…" else "API-Zusammenarbeit starten") }
+            if (runId.isNotBlank()) TextButton(onClick = {
+                scope.launch {
+                    try { api.request("/runs/$runId/cancel", "POST", JSONObject()); status = "Abbruch angefordert" }
+                    catch (e: Exception) { status = e.message ?: "Verbindungsfehler" }
+                }
+            }) { Text("Abbrechen") }
+            } else {
+            Row { Checkbox(taskMode, { taskMode = it }); Text("Als Aufgabe speichern") }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(noteKey, { noteKey = it }, label = { Text("Notizschlüssel") }, modifier = Modifier.weight(1f))
                 OutlinedTextField(noteValue, { noteValue = it }, label = { Text("Gemeinsame Notiz") }, modifier = Modifier.weight(2f))
             }
             TextButton(enabled = !busy && selectedRoom.isNotEmpty() && noteKey.isNotBlank(), onClick = {
                 runJob {
-                    api.request("/rooms/$selectedRoom/notes/${java.net.URLEncoder.encode(noteKey, "UTF-8")}", "PUT", JSONObject().put("value", noteValue))
+                    api.request("/rooms/$selectedRoom/records", "POST", JSONObject().put("kind", if (taskMode) "task" else "memory").put("title", noteKey).put("content", noteValue).put("source", "user:android").put("approved", true))
                     status = "Notiz gespeichert"
                 }
-            }) { Text("Notiz speichern") }
+            }) { Text("Gemeinsam speichern und freigeben") }
+            }
+        }
+        if (connected && selectedRoom.isNotBlank() && knowledgeMode) {
+            TextButton(enabled = !busy, onClick = { runJob {
+                val arr = JSONArray(api.request("/rooms/$selectedRoom/records"))
+                knowledge = (0 until arr.length()).joinToString("\n") { i -> val item = arr.getJSONObject(i); "${item.getString("title")}: ${item.getString("content")}" }
+            } }) { Text("Gemeinsames Wissen laden") }
+            if (knowledge.isNotBlank()) Text(knowledge, modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()))
         }
         if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         Text(status, style = MaterialTheme.typography.bodySmall)

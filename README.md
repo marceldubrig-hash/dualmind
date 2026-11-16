@@ -1,45 +1,53 @@
 # DualMind
 
-A self-hosted shared workspace connecting OpenAI and Google Gemini with an Android client.
+Shared, persistent single-owner workspace for connected ChatGPT/Gemini clients and a native Android app. Consumer-client communication and paid model-API orchestration are separate channels. Existing private chats are never scraped or automatically imported.
 
-## Status
-First MVP implementation. **Not deployed, APK not built, and external APIs not yet integration-tested.** The normal ChatGPT/Gemini consumer apps are **not** automatically connected. Their chat histories and memories do not transfer without an explicit supported integration/import.
+## What is implemented
 
-## Architecture
-- FastAPI backend, SQLite persistence, room-scoped conversation history and notes
-- OpenAI Responses API and Gemini generateContent REST adapters
-- Bounded collaborative conversation: OpenAI -> Gemini -> OpenAI, persisted in shared room
-- Single-user Bearer authentication; LLM API keys remain on the server
-- Android Kotlin/Compose client for rooms, messages, notes and collaborative rounds
+- FastAPI + SQLite projects, paginated messages with origin labels, approved structured records (memory, decision, summary, text document, task), source attribution, revision conflicts, record/message/run audit events, export and project deletion.
+- Literal project-scoped search, bounded keyword-ranked context selection from approved records only.
+- Durable collaboration state with 1–6 provider calls, output-token reservation, deadline checks, cancellation, a global two-job queue and daily call reservations. Failed/interrupted jobs require an explicit new run and are never auto-replayed.
+- OAuth-protected Streamable HTTP MCP resource server: issuer/JWKS signature, expiry, audience and owner-subject checks; read/write scopes; protected resource metadata supplied by the official MCP SDK. Login, PKCE and client registration are delegated to your OAuth provider.
+- Android Compose client: shared chat, projects, shared memory/tasks, polling/cancellation, explicit provider-transfer consent, system light/dark theme, safe insets, masked tokens, optional Android Keystore encrypted login storage. No provider keys in Android.
+- Backend tests and Android build/lint CI with APK artifact upload.
 
-## Server setup
-```bash
-cd server
+## Quick start
+
+Requires Python 3.12. From the repository root:
+
+```sh
 python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# Set a long random DUALMIND_TOKEN and both provider keys in .env
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+. .venv/bin/activate
+pip install -r server/requirements-mcp.txt
+cp server/.env.example server/.env
+# Edit server/.env; never commit it. Generate token with: python -c 'import secrets; print(secrets.token_urlsafe(32))'
+cd server
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
-For local development only, use http://127.0.0.1:8000. To reach it from a real phone, deploy behind HTTPS with access controls; **do not expose the local development server directly to the public internet**. Variables in .env are loaded by python-dotenv.
+
+Configure `DUALMIND_TOKEN` (at least 24 characters), persistent absolute `DUALMIND_DB`, and both provider keys. The database contains private plaintext; restrict file permissions, use encrypted disks/backups. Keep one backend process: startup marks unfinished runs interrupted. Do not horizontally scale this worker design.
+
+Backend docs are at `/docs`. Every data endpoint requires an exact `Authorization: Bearer …` header. `/health` is public. The existing `/rooms/{id}/collaborate` endpoint now returns 410; use `/rooms/{id}/runs` with explicit consent instead.
+
+## Remote MCP and existing apps
+
+See [connector setup](docs/CONNECTORS.md), [deployment](docs/DEPLOYMENT.md), and [verification/limitations](docs/STATUS.md). A public HTTPS hostname and a configured OAuth provider are required before connecting the normal apps. No live consumer app connection is claimed.
 
 ## Android
-Open `android/` in Android Studio with JDK 17, sync Gradle, and run on a device. Enter an HTTPS server URL and your DUALMIND_TOKEN in the connection screen. The token is held in memory only (re-enter on app restart). No API provider keys belong in Android.
 
-## API
-All endpoints except `/health` require `Authorization: Bearer <DUALMIND_TOKEN>`.
-- `POST /rooms` — body `{"name":"My room"}`
-- `GET /rooms`
-- `GET /rooms/{id}/messages`
-- `POST /rooms/{id}/messages` — body `{"role":"user","content":"..."}`
-- `GET /rooms/{id}/notes`
-- `PUT /rooms/{id}/notes/{key}` — body `{"value":"..."}`
-- `POST /rooms/{id}/collaborate` — body `{"prompt":"..."}`
+Open `android/` in Android Studio, or install Gradle 8.9, JDK 17, Android SDK 35 and run:
 
-The collaborative endpoint adds a user prompt, asks OpenAI for a proposal, Gemini for a critique, and OpenAI for a synthesis; all stages are saved. It is a bounded workflow, not an autonomous agent. Server HTTP requests have timeouts; provider failures surface as error responses. Calls may incur API charges.
+```sh
+cd android
+gradle --no-daemon assembleDebug lintDebug
+```
 
-## Security and next steps
-This MVP targets a single trusted user. The server bearer token is not multi-user IAM. Add encrypted secure token storage, rate limiting, deployment TLS, migration framework, tests with mocked providers, and account-based access controls before a wider release. Provider API formats/models can evolve; verify them during integration testing.
+The GitHub Actions workflow builds and uploads `DualMind-debug-apk` when successful. Enter your own HTTPS backend and owner token, then create/select a project. API collaboration requires explicit transfer/cost consent. No provider calls happen merely by connecting. Tap “Wissen & Aufgaben” to approve shared memory or tasks.
 
-Consumer-chat integration requires an explicitly available MCP/connectors integration in each chat client; this server alone does not magically grant access to those clients.
+## Tests
+
+```sh
+python -m pytest -q server
+```
+
+Provider tests use HTTP MockTransport and deterministic model responses; they are not real paid provider calls. MCP tests exercise Streamable HTTP initialization, tool discovery, auth rejection and read-only write rejection; they are not ChatGPT/Gemini application acceptance tests.
