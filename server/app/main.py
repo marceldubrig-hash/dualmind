@@ -119,11 +119,13 @@ def save_message(rid: str, role: str, content: str, origin: str = 'model_apis'):
 
 
 @app.get("/rooms/{rid}/messages", dependencies=[Depends(auth)])
-def messages(rid: str, limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0)):
+def messages(rid: str, limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0), latest: bool = False):
     with db() as c:
         ensure_room(c, rid)
-        return [dict(r) for r in c.execute(
-            "SELECT id,room_id,role,content,created_at,origin FROM messages WHERE room_id=? ORDER BY rowid LIMIT ? OFFSET ?", (rid, limit, offset))]
+        order = 'DESC' if latest else 'ASC'
+        rows = [dict(r) for r in c.execute(
+            f"SELECT id,room_id,role,content,created_at,origin FROM messages WHERE room_id=? ORDER BY rowid {order} LIMIT ? OFFSET ?", (rid, limit, offset))]
+        return list(reversed(rows)) if latest else rows
 
 
 @app.post("/rooms/{rid}/messages", dependencies=[Depends(auth)])

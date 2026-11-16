@@ -44,6 +44,7 @@ def test_run_mocked_providers_and_persistence(monkeypatch):
     assert result['state']=='completed'
     assert result['calls']==3
     assert result['result']=='proposal'
+    assert client.get(f'/rooms/{rid}/runs',headers=HEADERS).json()[0]['id']==run_id
     assert len(client.get(f'/rooms/{rid}/messages',headers=HEADERS).json())==4
 
 
@@ -88,4 +89,4 @@ def test_provider_failure_is_durable_without_automatic_retry(monkeypatch):
         time.sleep(.01)
     assert result['state']=='failed'
     assert result['calls']==1
-    assert result['error']=='HTTPException'
+    assert result['error']=='key missing'

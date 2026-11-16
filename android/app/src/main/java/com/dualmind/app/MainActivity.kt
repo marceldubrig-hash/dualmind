@@ -97,8 +97,8 @@ fun DualMindScreen() {
         }
     }
     fun reloadRooms() = runJob {
-        rooms.clear()
         val arr = JSONArray(api.request("/rooms"))
+        rooms.clear()
         for (i in 0 until arr.length()) {
             val item = arr.getJSONObject(i)
             rooms.add(item.getString("id") to item.getString("name"))
@@ -107,13 +107,34 @@ fun DualMindScreen() {
     }
     fun reloadMessages() = runJob {
         if (selectedRoom.isBlank()) return@runJob
-        val arr = JSONArray(api.request("/rooms/$selectedRoom/messages"))
+        val arr = JSONArray(api.request("/rooms/$selectedRoom/messages?latest=true"))
         lines.clear()
         for (i in 0 until arr.length()) {
             val item = arr.getJSONObject(i)
             lines.add(ChatLine(item.getString("role"),item.getString("content"),item.optString("origin")))
         }
         status = "Chat geladen"
+    }
+
+    suspend fun monitorRun(id: String) {
+        runId = id
+                    try {
+                        while (true) {
+                            val run = JSONObject(api.request("/runs/$runId"))
+                            status = "${run.getString("state")} · ${run.getInt("calls")} Modellaufrufe"
+                            val arr = JSONArray(api.request("/rooms/$selectedRoom/messages?latest=true"))
+                            lines.clear()
+                            for (i in 0 until arr.length()) {
+                                val item = arr.getJSONObject(i)
+                                lines.add(ChatLine(item.getString("role"), item.getString("content"), item.optString("origin")))
+                            }
+                            if (run.getString("state") !in listOf("queued", "running")) {
+                                status += " " + run.optString("error")
+                                break
+                            }
+                            delay(2000)
+                        }
+                    } finally { runId = "" }
     }
 
     Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().widthIn(max = 1000.dp).padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -178,30 +199,17 @@ fun DualMindScreen() {
                     Text(line.content, modifier = Modifier.padding(bottom = 12.dp))
                 }
             }
+            TextButton(enabled = !busy && selectedRoom.isNotBlank(), onClick = { runJob {
+                val runs = JSONArray(api.request("/rooms/$selectedRoom/runs"))
+                if (runs.length() > 0) monitorRun(runs.getJSONObject(0).getString("id")) else status = "Noch kein Lauf vorhanden"
+            } }) { Text("Letzten Lauf laden / fortsetzen") }
             OutlinedTextField(prompt, { prompt = it }, label = { Text("Aufgabe für beide KIs") }, modifier = Modifier.fillMaxWidth(), maxLines = 2)
             Row { Checkbox(approvedTransfer, { approvedTransfer = it }); Text("Aufgabe und freigegebenes Wissen an beide Anbieter senden (API-Kosten)") }
             Button(enabled = !busy && approvedTransfer && selectedRoom.isNotEmpty() && prompt.isNotBlank(), onClick = {
                 runJob {
                     val data = JSONObject().put("prompt", prompt).put("allow_provider_transfer", true)
                     val created = JSONObject(api.request("/rooms/$selectedRoom/runs", "POST", data))
-                    runId = created.getString("id")
-                    try {
-                        while (true) {
-                            val run = JSONObject(api.request("/runs/$runId"))
-                            status = "${run.getString("state")} · ${run.getInt("calls")} Modellaufrufe"
-                            val arr = JSONArray(api.request("/rooms/$selectedRoom/messages"))
-                            lines.clear()
-                            for (i in 0 until arr.length()) {
-                                val item = arr.getJSONObject(i)
-                                lines.add(ChatLine(item.getString("role"), item.getString("content"), item.optString("origin")))
-                            }
-                            if (run.getString("state") !in listOf("queued", "running")) {
-                                status += " " + run.optString("error")
-                                break
-                            }
-                            delay(2000)
-                        }
-                    } finally { runId = "" }
+                    monitorRun(created.getString("id"))
                 }
             }) { Text(if (busy) "Arbeitet…" else "API-Zusammenarbeit starten") }
             if (runId.isNotBlank()) TextButton(onClick = {

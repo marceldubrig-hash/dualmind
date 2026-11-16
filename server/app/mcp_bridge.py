@@ -55,7 +55,7 @@ def request(path,method='GET',body=None,write=False):
         raise PermissionError(f'{scope} required')
     if len(TOKEN)<24:
         raise ValueError('Backend credential not configured')
-    with httpx.Client(timeout=20,follow_redirects=False) as client:
+    with httpx.Client(timeout=20,follow_redirects=False,trust_env=False) as client:
         r=client.request(method,f'{BACKEND}{path}',headers={'Authorization':f'Bearer {TOKEN}'},json=body)
         r.raise_for_status()
         return r.json()
