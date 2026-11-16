@@ -90,3 +90,14 @@ def test_provider_failure_is_durable_without_automatic_retry(monkeypatch):
     assert result['state']=='failed'
     assert result['calls']==1
     assert result['error']=='key missing'
+
+
+def test_recent_messages_keep_chronological_order():
+    rid=project()
+    from uuid import uuid4
+    with main.db() as c:
+        c.executemany('INSERT INTO messages(id,room_id,role,content) VALUES (?,?,?,?)',[(str(uuid4()),rid,'user',str(i)) for i in range(105)])
+    recent=client.get(f'/rooms/{rid}/messages?latest=true&limit=3',headers=HEADERS).json()
+    assert [r['content'] for r in recent]==['102','103','104']
+    page=client.get(f'/rooms/{rid}/messages?limit=3&offset=3',headers=HEADERS).json()
+    assert [r['content'] for r in page]==['3','4','5']

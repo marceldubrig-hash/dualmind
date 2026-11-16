@@ -60,3 +60,24 @@ def test_authenticated_streamable_http_protocol(monkeypatch):
         # A read-only OAuth client must not be able to invoke a write tool.
         response=client.post('/mcp',headers=headers,json={'jsonrpc':'2.0','id':3,'method':'tools/call','params':{'name':'send_message','arguments':{'project_id':'00000000-0000-0000-0000-000000000000','content':'test','confirmed':True}}})
         assert response.json()['result']['isError'] is True
+
+
+def test_mcp_tools_share_backend_database(monkeypatch):
+    import httpx
+    from test_api import client, HEADERS
+    from mcp.server.auth.provider import AccessToken
+    real_client=httpx.Client
+    rid=client.post('/rooms',headers=HEADERS,json={'name':'MCP workspace'}).json()['id']
+    def route(req):
+        response=client.request(req.method,req.url.raw_path.decode(),headers=dict(req.headers),content=req.content)
+        return httpx.Response(response.status_code,json=response.json())
+    monkeypatch.setattr(bridge,'TOKEN',HEADERS['Authorization'][7:])
+    monkeypatch.setattr(bridge,'get_access_token',lambda:AccessToken(token='oauth-test',client_id='test',scopes=['workspace:read','workspace:write']))
+    monkeypatch.setattr(bridge.httpx,'Client',lambda **kwargs:real_client(transport=httpx.MockTransport(route),**kwargs))
+    assert any(p['id']==rid for p in bridge.list_projects())
+    bridge.send_message(rid,'message from connected client',True)
+    saved=client.get(f'/rooms/{rid}/messages',headers=HEADERS).json()[0]
+    assert saved['origin']=='connected_client'
+    oid=bridge.create_task(rid,'Review','Check work','test:connected-client',True)['id']
+    assert bridge.get_task_status(rid,oid)['status']=='pending'
+    assert bridge.search_shared_memory(rid,'Review')[0]['id']==oid

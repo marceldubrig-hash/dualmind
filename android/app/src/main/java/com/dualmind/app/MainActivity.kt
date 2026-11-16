@@ -68,7 +68,7 @@ fun DualMindScreen() {
     val saved = remember { credentials.load() }
     var server by remember { mutableStateOf(saved?.first ?: "") }
     var token by remember { mutableStateOf(saved?.second ?: "") }
-    var rememberLogin by remember { mutableStateOf(false) }
+    var rememberLogin by remember { mutableStateOf(saved != null) }
     var runId by remember { mutableStateOf("") }
     var approvedTransfer by remember { mutableStateOf(false) }
     var knowledge by remember { mutableStateOf("") }
@@ -170,6 +170,8 @@ fun DualMindScreen() {
                         selectedRoom = created.getString("id")
                         rooms.add(0, selectedRoom to created.getString("name"))
                         lines.clear()
+                        knowledge = ""
+                        manageProjects = false
                         status = "Raum erstellt"
                     }
                 }) { Text("+") }
@@ -181,7 +183,7 @@ fun DualMindScreen() {
             }
             LazyColumn(modifier = Modifier.heightIn(max = 70.dp)) {
                 items(rooms) { room ->
-                    TextButton(enabled = !busy, onClick = { selectedRoom = room.first; reloadMessages() }) {
+                    TextButton(enabled = !busy, onClick = { selectedRoom = room.first; knowledge = ""; reloadMessages() }) {
                         Text((if (room.first == selectedRoom) "● " else "") + room.second)
                     }
                 }
